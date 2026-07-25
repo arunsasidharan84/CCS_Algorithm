@@ -81,15 +81,20 @@ pub fn run(
 ) -> Result<PreprocessSummary, String> {
     let mut warnings = Vec::new();
     normalize_channel_set(rec, &options.non_eeg_channels);
-    
+
     eprintln!("PROGRESS 10 Converting channels to f64...");
     // Convert to f64 for all processing in parallel
-    let mut f64_channels: Vec<Vec<f64>> = rec.channels.par_iter()
+    let mut f64_channels: Vec<Vec<f64>> = rec
+        .channels
+        .par_iter()
         .map(|ch| ch.iter().map(|v| *v as f64).collect())
         .collect();
-        
+
     if (options.downsample_freq - rec.rate).abs() > 0.5 && options.downsample_freq > 0.0 {
-        eprintln!("PROGRESS 30 Downsampling from {} Hz to {} Hz...", rec.rate, options.downsample_freq);
+        eprintln!(
+            "PROGRESS 30 Downsampling from {} Hz to {} Hz...",
+            rec.rate, options.downsample_freq
+        );
         let scale = options.downsample_freq / rec.rate;
         let up = (options.downsample_freq * scale as f64).round().max(1.0) as usize;
         let down = (rec.rate * scale as f64).round().max(1.0) as usize;
@@ -97,7 +102,9 @@ pub fn run(
         f64_channels.par_iter_mut().for_each(|ch| {
             if let Some(pts) = pts_per_epoch {
                 if pts > 0 && ch.len() >= pts {
-                    let mut resampled = Vec::with_capacity((ch.len() as f64 * (options.downsample_freq / rec.rate)) as usize + 100);
+                    let mut resampled = Vec::with_capacity(
+                        (ch.len() as f64 * (options.downsample_freq / rec.rate)) as usize + 100,
+                    );
                     for chunk in ch.chunks(pts) {
                         resampled.extend(resample_poly(chunk, up, down));
                     }
@@ -108,7 +115,8 @@ pub fn run(
             *ch = resample_poly(ch, up, down);
         });
         if let Some(pts) = rec.source_epoch_samples {
-            rec.source_epoch_samples = Some((pts as f64 * (options.downsample_freq / rec.rate)).round() as usize);
+            rec.source_epoch_samples =
+                Some((pts as f64 * (options.downsample_freq / rec.rate)).round() as usize);
         }
         rec.rate = options.downsample_freq;
     }
@@ -137,14 +145,16 @@ pub fn run(
             }
         });
     }
-    
+
     let bad_channels = if options.badchannel {
         detect_bad_channels(rec)
     } else {
         Vec::new()
     };
     if options.epoch_before_gedai || options.epoch_length_seconds.is_some() {
-        let sec = options.epoch_length_seconds.unwrap_or(options.gedai_epoch_seconds);
+        let sec = options
+            .epoch_length_seconds
+            .unwrap_or(options.gedai_epoch_seconds);
         if sec > 0.0 {
             let pts = (rec.rate * sec).round() as usize;
             if pts > 0 && f64_channels.first().map(|c| c.len()).unwrap_or(0) >= pts {
@@ -183,7 +193,7 @@ pub fn run(
     if options.interpolate && !bad_channels.is_empty() {
         interpolate_bad_channels(&mut f64_channels, &rec.labels, &bad_channels);
     }
-    
+
     let mut source_localized = false;
     if options.source_localization {
         eprintln!("PROGRESS 85 Converting to source space (68 FreeSurfer ROIs via eLORETA)...");
@@ -199,7 +209,8 @@ pub fn run(
 
     // Copy back to f32 in parallel
     eprintln!("PROGRESS 88 Copying back to f32...");
-    rec.channels = f64_channels.par_iter()
+    rec.channels = f64_channels
+        .par_iter()
         .map(|ch| ch.iter().map(|v| *v as f32).collect())
         .collect();
 
@@ -274,9 +285,11 @@ fn normalize_channel_set(rec: &mut Recording, non_eeg: &[String]) {
 
 fn is_eeg_label(label: &str) -> bool {
     let upper = label.to_uppercase();
-    !["GSR", "ECG", "EOG", "EMG", "RESP", "X_DIR", "Y_DIR", "Z_DIR", "STATUS", "MARK"]
-        .iter()
-        .any(|bad| upper.contains(bad))
+    ![
+        "GSR", "ECG", "EOG", "EMG", "RESP", "X_DIR", "Y_DIR", "Z_DIR", "STATUS", "MARK",
+    ]
+    .iter()
+    .any(|bad| upper.contains(bad))
 }
 
 #[allow(dead_code)]
@@ -303,14 +316,14 @@ fn fir_bandpass(x: &mut [f64], rate: f64, low: f64, high: f64) {
         return;
     }
     let high = high.min(rate / 2.0);
-    
+
     // MNE calculates transition bands and sets the -6dB cutoff to the middle
     let l_trans = low.max(0.5).min(low); // For lowpass edge of highpass
     let h_trans = (high * 0.25).max(2.0).min(high); // For highpass edge of lowpass
-    
+
     let low_cutoff = low - l_trans / 2.0;
     let high_cutoff = high + h_trans / 2.0;
-    
+
     // Calculate filter length based on transition band, clamped to min 2.0 Hz for speed & stability
     let mut trans = if low > 0.0 && high > 0.0 {
         l_trans.min(h_trans)
@@ -337,12 +350,13 @@ fn fir_notch(x: &mut [f64], rate: f64, freq: f64) {
     }
     let width = 1.0;
     let trans = 2.0;
-    
+
     // For bandstop, MNE sets transition band 0.5 Hz by default
     let low_cutoff = (freq - width / 2.0) - trans / 2.0;
     let high_cutoff = (freq + width / 2.0) + trans / 2.0;
-    
-    let mut kernel = fir_bandpass_kernel(rate, low_cutoff, high_cutoff, mne_filter_len(rate, trans));
+
+    let mut kernel =
+        fir_bandpass_kernel(rate, low_cutoff, high_cutoff, mne_filter_len(rate, trans));
     for value in &mut kernel {
         *value = -*value;
     }
@@ -492,11 +506,11 @@ fn interpolate_bad_channels(channels: &mut [Vec<f64>], labels: &[String], bad: &
     let good_idx: Vec<usize> = (0..channels.len())
         .filter(|i| !bad_idx.contains(i))
         .collect();
-        
+
     // Build DMatrix for good and bad coords
     use crate::eeg::montage::STANDARD_1005_POS;
     use nalgebra::DMatrix;
-    
+
     let mut good_coords = Vec::new();
     let mut actual_good_idx = Vec::new();
     for &i in &good_idx {
@@ -505,7 +519,7 @@ fn interpolate_bad_channels(channels: &mut [Vec<f64>], labels: &[String], bad: &
             good_coords.push(*pos);
         }
     }
-    
+
     let mut bad_coords = Vec::new();
     let mut actual_bad_idx = Vec::new();
     for &i in &bad_idx {
@@ -514,7 +528,7 @@ fn interpolate_bad_channels(channels: &mut [Vec<f64>], labels: &[String], bad: &
             bad_coords.push(*pos);
         }
     }
-    
+
     if actual_good_idx.is_empty() || actual_bad_idx.is_empty() {
         // Fallback to mean if no coordinates
         for &bad_i in &bad_idx {
@@ -528,13 +542,13 @@ fn interpolate_bad_channels(channels: &mut [Vec<f64>], labels: &[String], bad: &
         }
         return;
     }
-    
+
     let pos_good = DMatrix::from_fn(actual_good_idx.len(), 3, |r, c| good_coords[r][c]);
     let pos_bad = DMatrix::from_fn(actual_bad_idx.len(), 3, |r, c| bad_coords[r][c]);
-    
+
     // Compute spherical spline interpolation matrix
     let w = crate::eeg::ransac::make_interpolation_matrix(&pos_good, &pos_bad);
-    
+
     let len = channels[0].len();
     for (b_local, &b_global) in actual_bad_idx.iter().enumerate() {
         for s in 0..len {
@@ -591,7 +605,12 @@ fn gedai(
     let mut thresholds = vec![broad_threshold];
     for (i, band) in bands.iter().take(process_bands).enumerate() {
         let pct = 50 + (25 * (i + 1) / process_bands);
-        eprintln!("PROGRESS {} GEDAI: cleaning MRA frequency band {}/{}...", pct, i + 1, process_bands);
+        eprintln!(
+            "PROGRESS {} GEDAI: cleaning MRA frequency band {}/{}...",
+            pct,
+            i + 1,
+            process_bands
+        );
         let (clean, _, _, threshold) =
             gedai_per_band(band, rate, epoch_seconds, &ref_cov, threshold_type, true)?;
         thresholds.push(threshold);
@@ -647,7 +666,15 @@ pub fn gedai_per_band(
             } else {
                 6.0
             };
-            optimize_threshold(&stream1, rate, epoch_seconds, ref_cov, &evals1, &evecs1, noise)
+            optimize_threshold(
+                &stream1,
+                rate,
+                epoch_seconds,
+                ref_cov,
+                &evals1,
+                &evecs1,
+                noise,
+            )
         }
         "auto+" => 3.0,
         "auto" => 6.0,
@@ -672,18 +699,17 @@ pub fn gedai_per_band(
             clean1[c][shift + s] += clean2[c][s];
         }
     }
-    let artifacts = subtract(&data.iter().map(|ch| ch[..len].to_vec()).collect::<Vec<_>>(), &clean1);
+    let artifacts = subtract(
+        &data.iter().map(|ch| ch[..len].to_vec()).collect::<Vec<_>>(),
+        &clean1,
+    );
     let score = sensai_basic(&clean1, &artifacts, rate, epoch_seconds, ref_cov, 1.0).unwrap_or(0.0);
     Ok((clean1, art1, score, threshold))
 }
 
 fn epoch_view(data: &[Vec<f64>], offset: usize, epoch: usize, epochs: usize) -> Vec<DMatrix<f64>> {
     (0..epochs)
-        .map(|e| {
-            DMatrix::from_fn(data.len(), epoch, |c, s| {
-                data[c][offset + e * epoch + s]
-            })
-        })
+        .map(|e| DMatrix::from_fn(data.len(), epoch, |c, s| data[c][offset + e * epoch + s]))
         .collect()
 }
 
@@ -695,7 +721,9 @@ fn gevd_epochs(
     let eig_ref = SymmetricEigen::new(ref_cov.clone());
     let mean = eig_ref.eigenvalues.iter().sum::<f64>() / n as f64;
     let b = ref_cov * 0.95 + DMatrix::identity(n, n) * (0.05 * mean.max(1e-12));
-    let chol = b.cholesky().ok_or("reference covariance is not positive definite")?;
+    let chol = b
+        .cholesky()
+        .ok_or("reference covariance is not positive definite")?;
     let l_inv = chol.l().try_inverse().ok_or("Failed to invert L")?;
     let (evals_all, evecs_all): (Vec<Vec<f64>>, Vec<DMatrix<f64>>) = epochs
         .par_iter()
@@ -809,9 +837,7 @@ fn sensai_basic(
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|a, b| ref_eig.eigenvalues[*a].total_cmp(&ref_eig.eigenvalues[*b]));
     let top = 3.min(n);
-    let template = DMatrix::from_fn(n, top, |r, c| {
-        ref_eig.eigenvectors[(r, order[n - top + c])]
-    });
+    let template = DMatrix::from_fn(n, top, |r, c| ref_eig.eigenvectors[(r, order[n - top + c])]);
     let mut sig = Vec::new();
     let mut noi = Vec::new();
     for e in 0..epochs {
@@ -828,11 +854,12 @@ fn subspace_similarity(cov: &DMatrix<f64>, template: &DMatrix<f64>, top: usize) 
     let n = cov.nrows();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|a, b| eig.eigenvalues[*a].total_cmp(&eig.eigenvalues[*b]));
-    let basis = DMatrix::from_fn(n, top, |r, c| {
-        eig.eigenvectors[(r, order[n - top + c])]
-    });
+    let basis = DMatrix::from_fn(n, top, |r, c| eig.eigenvectors[(r, order[n - top + c])]);
     let svd = (basis.transpose() * template).svd(false, false);
-    svd.singular_values.iter().map(|s| s.clamp(0.0, 1.0)).product()
+    svd.singular_values
+        .iter()
+        .map(|s| s.clamp(0.0, 1.0))
+        .product()
 }
 
 fn optimize_threshold(
@@ -846,7 +873,8 @@ fn optimize_threshold(
 ) -> f64 {
     let mut f = |t: f64| -> f64 {
         let (clean, art) = clean_eeg(epochs, t, evals, evecs);
-        -sensai_basic(&clean, &art, rate, epoch_seconds, ref_cov, noise).unwrap_or(f64::NEG_INFINITY)
+        -sensai_basic(&clean, &art, rate, epoch_seconds, ref_cov, noise)
+            .unwrap_or(f64::NEG_INFINITY)
     };
     brent_minimize(&mut f, 0.0, 12.0, 1e-3)
 }
@@ -859,20 +887,20 @@ fn brent_minimize<F: FnMut(f64) -> f64>(f: &mut F, a: f64, b: f64, tol: f64) -> 
     let mut w = x;
     let mut v = w;
     let mut e = 0.0f64;
-    
+
     let mut fx = f(x);
     let mut fw = fx;
     let mut fv = fw;
-    
+
     for _ in 0..100 {
         let m = 0.5 * (ax + cx);
         let tol1 = tol * x.abs() + 1e-8;
         let tol2 = 2.0 * tol1;
-        
+
         if (x - m).abs() <= tol2 - 0.5 * (cx - ax) {
             break;
         }
-        
+
         let mut d = 0.0;
         if e.abs() > tol1 {
             let r = (x - w) * (fx - fv);
@@ -884,10 +912,10 @@ fn brent_minimize<F: FnMut(f64) -> f64>(f: &mut F, a: f64, b: f64, tol: f64) -> 
             } else {
                 q = -q;
             }
-            
+
             let temp = e;
             e = d;
-            
+
             if p.abs() >= (0.5 * q * temp).abs() || p <= q * (ax - x) || p >= q * (cx - x) {
                 e = if x >= m { ax - x } else { cx - x };
                 d = golden * e;
@@ -902,27 +930,41 @@ fn brent_minimize<F: FnMut(f64) -> f64>(f: &mut F, a: f64, b: f64, tol: f64) -> 
             e = if x >= m { ax - x } else { cx - x };
             d = golden * e;
         }
-        
+
         let u = if d.abs() >= tol1 {
             x + d
         } else {
             x + if d >= 0.0 { tol1 } else { -tol1 }
         };
-        
+
         let fu = f(u);
-        
+
         if fu <= fx {
-            if u >= x { ax = x; } else { cx = x; }
-            v = w; fv = fw;
-            w = x; fw = fx;
-            x = u; fx = fu;
+            if u >= x {
+                ax = x;
+            } else {
+                cx = x;
+            }
+            v = w;
+            fv = fw;
+            w = x;
+            fw = fx;
+            x = u;
+            fx = fu;
         } else {
-            if u < x { ax = u; } else { cx = u; }
+            if u < x {
+                ax = u;
+            } else {
+                cx = u;
+            }
             if fu <= fw || w == x {
-                v = w; fv = fw;
-                w = u; fw = fu;
+                v = w;
+                fv = fw;
+                w = u;
+                fw = fu;
             } else if fu <= fv || v == x || v == w {
-                v = u; fv = fu;
+                v = u;
+                fv = fu;
             }
         }
     }
@@ -933,7 +975,7 @@ fn modwt_mra_all(data: &[Vec<f64>], levels: usize) -> Vec<Vec<Vec<f64>>> {
     let n = data.len();
     let len = data[0].len();
     let mut out = vec![vec![vec![0.0; len]; n]; levels + 1];
-    
+
     for c in 0..n {
         let (w_all, v) = modwt_haar(&data[c], levels);
         let mra = modwtmra_haar(&w_all, &v);
@@ -968,7 +1010,7 @@ fn modwtmra_haar(w_all: &[Vec<f64>], v: &[f64]) -> Vec<Vec<f64>> {
     let n = v.len();
     let mut mra = Vec::new();
     let zeros = vec![0.0; n];
-    
+
     for j_target in 1..=levels {
         let mut v_curr = vec![0.0; n];
         for j in (1..=levels).rev() {
@@ -977,13 +1019,13 @@ fn modwtmra_haar(w_all: &[Vec<f64>], v: &[f64]) -> Vec<Vec<f64>> {
         }
         mra.push(v_curr);
     }
-    
+
     let mut v_curr = v.to_vec();
     for j in (1..=levels).rev() {
         v_curr = idwt_step_haar(&v_curr, &zeros, j);
     }
     mra.push(v_curr);
-    
+
     mra
 }
 
@@ -1115,8 +1157,14 @@ mod tests {
         Recording {
             rate: 100.0,
             labels: vec![
-                "AF3".into(), "AF4".into(), "Fz".into(), "F3".into(),
-                "F4".into(), "T7".into(), "DEAD".into(), "NOISY".into(),
+                "AF3".into(),
+                "AF4".into(),
+                "Fz".into(),
+                "F3".into(),
+                "F4".into(),
+                "T7".into(),
+                "DEAD".into(),
+                "NOISY".into(),
             ],
             channels,
             source_epoch_samples: None,
@@ -1129,8 +1177,14 @@ mod tests {
         let bad = detect_bad_channels(&varied_recording());
 
         // The dead and artefact channels must be caught.
-        assert!(bad.contains(&"DEAD".to_string()), "flat channel not detected");
-        assert!(bad.contains(&"NOISY".to_string()), "artefact channel not detected");
+        assert!(
+            bad.contains(&"DEAD".to_string()),
+            "flat channel not detected"
+        );
+        assert!(
+            bad.contains(&"NOISY".to_string()),
+            "artefact channel not detected"
+        );
 
         // Regression: these seven labels used to be hardcoded as bad on every
         // recording. Healthy channels carrying those names must now pass.

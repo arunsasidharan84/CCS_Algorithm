@@ -1,9 +1,14 @@
+use crate::eeg::Recording;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use crate::eeg::Recording;
 
-enum Bm { I16, U16, I32, F32 }
+enum Bm {
+    I16,
+    U16,
+    I32,
+    F32,
+}
 
 pub fn load_vhdr(path: &Path) -> Result<Recording, String> {
     let content = fs::read_to_string(path)
@@ -74,7 +79,10 @@ pub fn load_vhdr(path: &Path) -> Result<Recording, String> {
     }
 
     if sampling_interval_us <= 0.0 {
-        return Err(format!("Invalid SamplingInterval {} in .vhdr", sampling_interval_us));
+        return Err(format!(
+            "Invalid SamplingInterval {} in .vhdr",
+            sampling_interval_us
+        ));
     }
     let rate = 1_000_000.0 / sampling_interval_us;
     if num_channels == 0 {
@@ -84,7 +92,12 @@ pub fn load_vhdr(path: &Path) -> Result<Recording, String> {
     let mut labels = Vec::with_capacity(num_channels);
     let mut resolutions = Vec::with_capacity(num_channels);
     for i in 1..=num_channels {
-        labels.push(channel_names.get(&i).cloned().unwrap_or_else(|| format!("Ch{}", i)));
+        labels.push(
+            channel_names
+                .get(&i)
+                .cloned()
+                .unwrap_or_else(|| format!("Ch{}", i)),
+        );
         resolutions.push(channel_resolutions.get(&i).cloned().unwrap_or(1.0));
     }
 
@@ -98,12 +111,20 @@ pub fn load_vhdr(path: &Path) -> Result<Recording, String> {
         } else if dat_path.exists() {
             data_path = dat_path;
         } else {
-            return Err(format!("Companion data file not found for {}", path.display()));
+            return Err(format!(
+                "Companion data file not found for {}",
+                path.display()
+            ));
         }
     }
 
-    let bytes = fs::read(&data_path)
-        .map_err(|e| format!("Failed reading EEG data file {}: {}", data_path.display(), e))?;
+    let bytes = fs::read(&data_path).map_err(|e| {
+        format!(
+            "Failed reading EEG data file {}: {}",
+            data_path.display(),
+            e
+        )
+    })?;
 
     let bytes_per_sample = match binary_format.as_str() {
         "INT_16" | "UINT_16" => 2,
@@ -120,7 +141,10 @@ pub fn load_vhdr(path: &Path) -> Result<Recording, String> {
 
     let total_samples = bytes.len() / (num_channels * bytes_per_sample);
     if total_samples == 0 {
-        return Err(format!("Data file {} contains 0 complete samples", data_path.display()));
+        return Err(format!(
+            "Data file {} contains 0 complete samples",
+            data_path.display()
+        ));
     }
 
     let mut channels = vec![vec![0.0f32; total_samples]; num_channels];

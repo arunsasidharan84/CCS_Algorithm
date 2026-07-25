@@ -219,7 +219,9 @@ pub fn compute_coupled_session(
     }
 
     let default_eeg_labels = if let Some(chs) = eeg_channels {
-        (0..chs.len()).map(|i| format!("EEG_{i}")).collect::<Vec<_>>()
+        (0..chs.len())
+            .map(|i| format!("EEG_{i}"))
+            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -284,7 +286,11 @@ pub fn compute_coupled_session(
                 let start = sample_start.min(end);
                 let slice = &card[start..end];
                 if !slice.is_empty() {
-                    Some(extract_cardiac_features(slice, config.cardiac_srate, modality))
+                    Some(extract_cardiac_features(
+                        slice,
+                        config.cardiac_srate,
+                        modality,
+                    ))
                 } else {
                     None
                 }
@@ -305,7 +311,11 @@ pub fn compute_coupled_session(
                 sqi_sum += card.sqi;
                 sqi_cnt += 1.0;
             }
-            let window_overall_sqi = if sqi_cnt > 0.0 { sqi_sum / sqi_cnt } else { 0.0 };
+            let window_overall_sqi = if sqi_cnt > 0.0 {
+                sqi_sum / sqi_cnt
+            } else {
+                0.0
+            };
 
             CoupledWindowRecord {
                 window_idx: win_idx,

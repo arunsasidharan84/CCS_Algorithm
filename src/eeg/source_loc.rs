@@ -58,7 +58,10 @@ pub fn convert_to_source_space(
         ));
     }
 
-    eprintln!("PROGRESS 20 Constructing forward leadfield for {} matched channels...", m);
+    eprintln!(
+        "PROGRESS 20 Constructing forward leadfield for {} matched channels...",
+        m
+    );
     let n_sources = model.leadfield[0].len();
     let l_mat = DMatrix::from_fn(m, n_sources, |r, c| {
         model.leadfield[matched_canon_idx[r]][c]
@@ -67,7 +70,11 @@ pub fn convert_to_source_space(
     eprintln!("PROGRESS 40 Computing regularized inverse operator (MNE / eLORETA)...");
     let l_lt = &l_mat * l_mat.transpose();
     let tr_l_lt = l_lt.trace();
-    let lambda2 = if snr > 0.0 { 1.0 / (snr * snr) } else { 1.0 / 9.0 };
+    let lambda2 = if snr > 0.0 {
+        1.0 / (snr * snr)
+    } else {
+        1.0 / 9.0
+    };
     let alpha = tr_l_lt / (m as f64) * lambda2;
 
     let mut reg_l_lt = l_lt;
@@ -75,10 +82,15 @@ pub fn convert_to_source_space(
         reg_l_lt[(i, i)] += alpha;
     }
 
-    let inv_l_lt = reg_l_lt.try_inverse().ok_or("Failed to invert L*L^T matrix")?;
+    let inv_l_lt = reg_l_lt
+        .try_inverse()
+        .ok_or("Failed to invert L*L^T matrix")?;
     let w_mat = l_mat.transpose() * inv_l_lt;
 
-    eprintln!("PROGRESS 60 Projecting {} samples to {} cortical dipoles...", samples, n_sources);
+    eprintln!(
+        "PROGRESS 60 Projecting {} samples to {} cortical dipoles...",
+        samples, n_sources
+    );
     let x_data: Vec<Vec<f64>> = matched_rec_idx
         .iter()
         .map(|&idx| channels[idx].clone())
@@ -129,7 +141,9 @@ pub fn convert_to_source_space(
 
             let mut roi_tc = vec![0.0f64; samples];
             for s in 0..samples {
-                let sum: f64 = (0..k).map(|row_idx| flips[row_idx] * s_roi[row_idx][s]).sum();
+                let sum: f64 = (0..k)
+                    .map(|row_idx| flips[row_idx] * s_roi[row_idx][s])
+                    .sum();
                 roi_tc[s] = (sum / (k as f64)) * 10000.0;
             }
             roi_tc
@@ -149,16 +163,19 @@ mod tests {
     #[test]
     fn test_source_space_amplitude() {
         let labels = vec![
-            "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
-            "T3", "C3", "Cz", "C4", "T4",
-            "T5", "P3", "Pz", "P4", "T6",
-            "O1", "O2"
-        ].into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8", "T3", "C3", "Cz", "C4", "T4", "T5", "P3",
+            "Pz", "P4", "T6", "O1", "O2",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
 
         let samples = 1000;
         let mut channels = Vec::new();
         for (i, _) in labels.iter().enumerate() {
-            let ch = (0..samples).map(|s| 50.0 * ((s as f64) * 0.1 + (i as f64)).sin()).collect();
+            let ch = (0..samples)
+                .map(|s| 50.0 * ((s as f64) * 0.1 + (i as f64)).sin())
+                .collect();
             channels.push(ch);
         }
 
@@ -166,7 +183,11 @@ mod tests {
         assert_eq!(rois.len(), 68);
         assert_eq!(roi_labels.len(), 68);
 
-        let max_val = rois.iter().flat_map(|ch| ch.iter()).cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        let max_val = rois
+            .iter()
+            .flat_map(|ch| ch.iter())
+            .cloned()
+            .fold(0.0f64, |a, b| a.max(b.abs()));
         println!("MAX ROI AMPLITUDE: {}", max_val);
     }
 }

@@ -240,7 +240,10 @@ pub fn detect_ecg_peaks(ecg: &[f64], fs: f64) -> Vec<usize> {
                 max_idx = i;
             }
         }
-        if refined.last().map_or(true, |&last| max_idx.abs_diff(last) >= min_distance) {
+        if refined
+            .last()
+            .map_or(true, |&last| max_idx.abs_diff(last) >= min_distance)
+        {
             refined.push(max_idx);
         }
     }

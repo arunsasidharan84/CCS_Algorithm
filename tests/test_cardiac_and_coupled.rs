@@ -26,15 +26,31 @@ fn test_cardiac_ppg_vs_ecg_distinctions() {
     // Test PPG extraction
     // Test PPG extraction
     let ppg_feats = extract_cardiac_features(&signal, srate, Modality::Ppg);
-    assert!(ppg_feats.avg_hr_bpm > 30.0 && ppg_feats.avg_hr_bpm < 180.0, "PPG heart rate out of bounds: {}", ppg_feats.avg_hr_bpm);
+    assert!(
+        ppg_feats.avg_hr_bpm > 30.0 && ppg_feats.avg_hr_bpm < 180.0,
+        "PPG heart rate out of bounds: {}",
+        ppg_feats.avg_hr_bpm
+    );
     assert_eq!(ppg_feats.modality, "PPG");
-    assert!(ppg_feats.num_peaks >= 20, "Expected at least 20 peaks, got {}", ppg_feats.num_peaks);
+    assert!(
+        ppg_feats.num_peaks >= 20,
+        "Expected at least 20 peaks, got {}",
+        ppg_feats.num_peaks
+    );
 
     // Test ECG extraction
     let ecg_feats = extract_cardiac_features(&signal, srate, Modality::Ecg);
-    assert!(ecg_feats.avg_hr_bpm > 30.0 && ecg_feats.avg_hr_bpm < 180.0, "ECG heart rate out of bounds: {}", ecg_feats.avg_hr_bpm);
+    assert!(
+        ecg_feats.avg_hr_bpm > 30.0 && ecg_feats.avg_hr_bpm < 180.0,
+        "ECG heart rate out of bounds: {}",
+        ecg_feats.avg_hr_bpm
+    );
     assert_eq!(ecg_feats.modality, "ECG");
-    assert!(ecg_feats.num_peaks >= 20, "Expected at least 20 peaks, got {}", ecg_feats.num_peaks);
+    assert!(
+        ecg_feats.num_peaks >= 20,
+        "Expected at least 20 peaks, got {}",
+        ecg_feats.num_peaks
+    );
     // Verify ECG zeroes out PPG-specific second derivative APG ratios
     assert_eq!(ecg_feats.apg_b_a_ratio, 0.0);
     assert_eq!(ecg_feats.apg_d_a_ratio, 0.0);
@@ -106,7 +122,11 @@ fn test_coupled_flexible_execution_modes() {
     );
     assert!(res_both.num_windows >= 1);
     assert!(res_both.records[0].cardiac_features.is_some());
-    assert!(!res_both.records[0].eeg_subepochs.as_ref().unwrap().is_empty());
+    assert!(!res_both.records[0]
+        .eeg_subepochs
+        .as_ref()
+        .unwrap()
+        .is_empty());
 
     // Mode 2: EegOnly
     let config_eeg = CoupledEpochConfig {
@@ -114,15 +134,15 @@ fn test_coupled_flexible_execution_modes() {
         enable_cardiac: false,
         ..config_both.clone()
     };
-    let res_eeg = compute_coupled_session(
-        Some(&eeg_channels),
-        Some(&eeg_labels),
-        None,
-        &config_eeg,
-    );
+    let res_eeg =
+        compute_coupled_session(Some(&eeg_channels), Some(&eeg_labels), None, &config_eeg);
     assert!(res_eeg.num_windows >= 1);
     assert!(res_eeg.records[0].cardiac_features.is_none());
-    assert!(!res_eeg.records[0].eeg_subepochs.as_ref().unwrap().is_empty());
+    assert!(!res_eeg.records[0]
+        .eeg_subepochs
+        .as_ref()
+        .unwrap()
+        .is_empty());
 
     // Mode 3: CardiacOnly
     let config_cardiac = CoupledEpochConfig {
@@ -130,12 +150,7 @@ fn test_coupled_flexible_execution_modes() {
         enable_cardiac: true,
         ..config_both.clone()
     };
-    let res_cardiac = compute_coupled_session(
-        None,
-        None,
-        Some(&cardiac),
-        &config_cardiac,
-    );
+    let res_cardiac = compute_coupled_session(None, None, Some(&cardiac), &config_cardiac);
     assert!(res_cardiac.num_windows >= 1);
     assert!(res_cardiac.records[0].cardiac_features.is_some());
     assert!(res_cardiac.records[0].eeg_subepochs.is_none());
@@ -210,9 +225,7 @@ fn test_ffi_json_interface_and_memory_cleanup() {
         srate: Some(srate),
     };
 
-    let cardiac_payload = CardiacInputPayload {
-        signal: cardiac,
-    };
+    let cardiac_payload = CardiacInputPayload { signal: cardiac };
 
     let config_json = serde_json::to_string(&config).unwrap();
     let eeg_json = serde_json::to_string(&eeg_payload).unwrap();
@@ -222,11 +235,8 @@ fn test_ffi_json_interface_and_memory_cleanup() {
     let c_eeg = CString::new(eeg_json).unwrap();
     let c_cardiac = CString::new(cardiac_json).unwrap();
 
-    let raw_ptr = ccs_compute_coupled_session_json(
-        c_config.as_ptr(),
-        c_eeg.as_ptr(),
-        c_cardiac.as_ptr(),
-    );
+    let raw_ptr =
+        ccs_compute_coupled_session_json(c_config.as_ptr(), c_eeg.as_ptr(), c_cardiac.as_ptr());
     assert!(!raw_ptr.is_null());
 
     let output_str = unsafe { CStr::from_ptr(raw_ptr).to_str().unwrap() };

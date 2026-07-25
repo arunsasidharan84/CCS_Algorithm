@@ -396,9 +396,7 @@ fn fit_gaussians(frequencies: &[f64], target: &[f64], peaks: &mut [Gaussian]) {
 
 fn fooof_model(psd: &[f64]) -> (Vec<f64>, BTreeMap<String, f64>) {
     let fit_max = 50.min(psd.len().saturating_sub(1));
-    let frequencies = (1..=fit_max)
-        .map(|value| value as f64)
-        .collect::<Vec<_>>();
+    let frequencies = (1..=fit_max).map(|value| value as f64).collect::<Vec<_>>();
     let power = psd[1..=fit_max]
         .iter()
         .map(|value| value.log10())
@@ -482,8 +480,7 @@ fn fooof_model(psd: &[f64]) -> (Vec<f64>, BTreeMap<String, f64>) {
         guesses.push(peak);
     }
     guesses.retain(|peak| {
-        (peak.center - 1.0).abs() > peak.width
-            && (peak.center - fit_max as f64).abs() > peak.width
+        (peak.center - 1.0).abs() > peak.width && (peak.center - fit_max as f64).abs() > peak.width
     });
     guesses.sort_by(|left, right| left.center.total_cmp(&right.center));
     let mut drop = vec![false; guesses.len()];
@@ -749,7 +746,10 @@ mod tests {
                     1e-4
                 };
                 if error > tolerance {
-                    println!("    {} Hz {} error {} > {}", fixture.sfreq, name, error, tolerance);
+                    println!(
+                        "    {} Hz {} error {} > {}",
+                        fixture.sfreq, name, error, tolerance
+                    );
                 }
             }
         }

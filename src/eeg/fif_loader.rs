@@ -107,7 +107,8 @@ pub fn load_fif(path: &Path) -> Result<Recording, String> {
         return Err("FIF file contains no channel info".into());
     }
 
-    let epoch_bytes = epoch_data_tag.ok_or_else(|| "FIF file contains no epoch data".to_string())?;
+    let epoch_bytes =
+        epoch_data_tag.ok_or_else(|| "FIF file contains no epoch data".to_string())?;
     if epoch_bytes.len() < 16 {
         return Err("FIF epoch data too short".into());
     }

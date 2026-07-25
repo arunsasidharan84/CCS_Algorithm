@@ -106,7 +106,11 @@ pub fn compute_hrv_features(peaks: &[usize], srate: f64) -> HrvMetrics {
     let pnn20 = (nn20 / (n - 1.0)) * 100.0;
     let cvnn = if mean_rr > 0.0 { sdnn / mean_rr } else { 0.0 };
     let cvsd = if mean_rr > 0.0 { rmssd / mean_rr } else { 0.0 };
-    let avg_hr_bpm = if mean_rr > 0.0 { 60000.0 / mean_rr } else { 0.0 };
+    let avg_hr_bpm = if mean_rr > 0.0 {
+        60000.0 / mean_rr
+    } else {
+        0.0
+    };
 
     // Poincaré plot features
     let sd1 = stddev(&diffs) / std::f64::consts::SQRT_2;
@@ -241,7 +245,11 @@ fn compute_frequency_hrv(rr: &[f64], mean_rr_ms: f64) -> (f64, f64, f64, f64) {
     if freqs.is_empty() {
         return (0.0, 0.0, 0.0, 0.0);
     }
-    let df = if freqs.len() > 1 { freqs[1] - freqs[0] } else { 1.0 };
+    let df = if freqs.len() > 1 {
+        freqs[1] - freqs[0]
+    } else {
+        1.0
+    };
     let mut vlf = 0.0;
     let mut lf = 0.0;
     let mut hf = 0.0;

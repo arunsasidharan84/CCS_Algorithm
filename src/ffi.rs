@@ -62,8 +62,8 @@ pub extern "C" fn ccs_compute_coupled_session_json(
         .and_then(|s| serde_json::from_str::<CoupledEpochConfig>(&s).ok())
         .unwrap_or_default();
 
-    let eeg_input = cstr_to_string(eeg_json)
-        .and_then(|s| serde_json::from_str::<EegInputPayload>(&s).ok());
+    let eeg_input =
+        cstr_to_string(eeg_json).and_then(|s| serde_json::from_str::<EegInputPayload>(&s).ok());
 
     if let Some(ref e) = eeg_input {
         if let Some(sr) = e.srate {
@@ -105,7 +105,9 @@ pub extern "C" fn ccs_compute_eeg_isolated_json(
         .and_then(|s| serde_json::from_str::<EegInputPayload>(&s).ok())
     {
         Some(e) => e,
-        None => return string_to_cptr(r#"{"error": "Invalid or missing EEG payload"}"#.to_string()),
+        None => {
+            return string_to_cptr(r#"{"error": "Invalid or missing EEG payload"}"#.to_string())
+        }
     };
 
     let options = cstr_to_string(options_json)

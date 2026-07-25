@@ -1,7 +1,7 @@
 use nalgebra::{DMatrix, SymmetricEigen};
 use rustfft::{num_complex::Complex64, FftPlanner};
 
-use crate::eeg::{Options, features::BANDS};
+use crate::eeg::{features::BANDS, Options};
 
 const N_FREQS: usize = 15;
 const GC_LAGS: usize = 25;
@@ -110,7 +110,10 @@ fn multivariate_scores(
         .enumerate()
         .filter(|(_, l)| {
             let u = l.to_uppercase();
-            u.starts_with('P') || u.starts_with('O') || u.contains("PARIETAL") || u.contains("OCCIPITAL")
+            u.starts_with('P')
+                || u.starts_with('O')
+                || u.contains("PARIETAL")
+                || u.contains("OCCIPITAL")
         })
         .map(|(index, _)| index)
         .collect();
