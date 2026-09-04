@@ -138,6 +138,54 @@ fn representative_eeg_epochs(signal: &[f64]) -> Vec<&[f64]> {
         .collect()
 }
 
+/// Exact representative epoch set used by session-level nonlinear summaries,
+/// exposed so downstream audit exports can reproduce values such as DFA.
+fn nonlinear_audit_epochs(signal: &[f64], channel: &str) -> Vec<serde_json::Value> {
+    let epoch = (4.0 * SAMPLE_RATE) as usize;
+    let epoch_count = signal.len() / epoch;
+    if epoch_count == 0 {
+        return Vec::new();
+    }
+    let selected = epoch_count.min(12);
+    (0..selected)
+        .filter_map(|representative_index| {
+            let source_index = if selected == 1 {
+                0
+            } else {
+                representative_index * (epoch_count - 1) / (selected - 1)
+            };
+            let values = &signal[source_index * epoch..(source_index + 1) * epoch];
+            if variance(values) <= 1e-6 {
+                return None;
+            }
+            let mut row = serde_json::Map::new();
+            row.insert("channel".to_string(), serde_json::json!(channel));
+            row.insert(
+                "representativeEpochNumber".to_string(),
+                serde_json::json!(representative_index + 1),
+            );
+            row.insert(
+                "sourceEpochNumber".to_string(),
+                serde_json::json!(source_index + 1),
+            );
+            row.insert(
+                "timeSeconds".to_string(),
+                serde_json::json!(source_index as f64 * 4.0),
+            );
+            row.insert(
+                "EEG_SQI_percent".to_string(),
+                serde_json::json!(crate::sqi::eeg_epoch_quality(values) * 100.0),
+            );
+            for (name, value) in nonlinear::all(values) {
+                if value.is_finite() {
+                    row.insert(nonlinear_label(name).to_string(), serde_json::json!(value));
+                }
+            }
+            Some(serde_json::Value::Object(row))
+        })
+        .collect()
+}
+
 /// Median nonlinear features from at most twelve representative clean 4-second
 /// epochs. Sample entropy is quadratic in epoch length, so applying it to an
 /// entire multi-minute recording would add load without improving temporal
@@ -427,8 +475,14 @@ pub fn extract_orb_features_json(orb_path: &str) -> Result<String, String> {
         add_cardiac_features(&mut rows, &cardiac, ppg_duration_seconds);
     }
 
+    let audit_epochs = nonlinear_audit_epochs(&samples.af7, "AF7")
+        .into_iter()
+        .chain(nonlinear_audit_epochs(&samples.af8, "AF8"))
+        .collect::<Vec<_>>();
+
     let out = serde_json::json!({
         "rows": rows,
+        "auditEpochs": audit_epochs,
         "windows": windows.iter().map(|w| serde_json::json!({
             "timeSeconds": w.time_seconds,
             "cognitiveSpeed": w.cognitive_speed,
