@@ -143,21 +143,17 @@ fn multivariate_scores(
                 mim[frequency] = e.iter().map(|value| value * value).sum();
             }
             if options.mic {
+                // MIC represents the maximal imaginary coherency between seed and target
+                // subspaces (the top singular value of the imaginary coherency matrix E).
+                // Eigensolvers define eigenvectors up to an arbitrary sign factor; to ensure
+                // solver-, platform-, and channel-permutation invariance, MIC is defined
+                // as the non-negative magnitude (top singular value sigma_1 >= 0).
                 let left = SymmetricEigen::new(&e * e.transpose());
                 let right = SymmetricEigen::new(e.transpose() * &e);
-                let alpha = lapack_orient(
-                    left.eigenvectors
-                        .column(left.eigenvalues.imax())
-                        .into_owned(),
-                );
-                let beta = lapack_orient(
-                    right
-                        .eigenvectors
-                        .column(right.eigenvalues.imax())
-                        .into_owned(),
-                );
-                mic[frequency] =
-                    (alpha.transpose() * &e * &beta)[(0, 0)] / (alpha.norm() * beta.norm());
+                let alpha = left.eigenvectors.column(left.eigenvalues.imax());
+                let beta = right.eigenvectors.column(right.eigenvalues.imax());
+                let score = (alpha.transpose() * &e * beta)[(0, 0)] / (alpha.norm() * beta.norm());
+                mic[frequency] = score.abs();
             }
         }
     }
@@ -223,15 +219,6 @@ fn imaginary_coherency(csd: &DMatrix<Complex64>, n_seeds: usize) -> DMatrix<f64>
     DMatrix::from_fn(n_seeds, n - n_seeds, |row, column| {
         coherency[(row, n_seeds + column)].im
     })
-}
-
-fn lapack_orient(mut vector: nalgebra::DVector<f64>) -> nalgebra::DVector<f64> {
-    let dominant = vector.iamax();
-    let desired_sign = if dominant % 2 == 0 { -1.0 } else { 1.0 };
-    if vector[dominant].signum() != desired_sign {
-        vector *= -1.0;
-    }
-    vector
 }
 
 fn bivariate_scores(coefficients: &[Vec<Vec<Complex64>>], options: &Options) -> Vec<Vec<Vec<f64>>> {
@@ -608,7 +595,7 @@ fn band_means(values: &[f64], frequencies: &[f64]) -> Vec<f64> {
                 .iter()
                 .zip(frequencies)
                 .filter_map(|(value, frequency)| {
-                    (*frequency >= band.0 && *frequency <= band.1).then_some(*value)
+                    (*frequency >= band.0 - 1e-9 && *frequency <= band.1 + 1e-9).then_some(*value)
                 })
                 .collect();
             selected.iter().sum::<f64>() / selected.len() as f64
@@ -617,11 +604,24 @@ fn band_means(values: &[f64], frequencies: &[f64]) -> Vec<f64> {
 }
 
 fn logspace(start: f64, end: f64, count: usize) -> Vec<f64> {
-    let start = start.log10();
-    let step = (end.log10() - start) / (count - 1) as f64;
-    (0..count)
-        .map(|index| 10.0_f64.powf(start + step * index as f64))
-        .collect()
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![start];
+    }
+    let start_log = start.log10();
+    let step = (end.log10() - start_log) / (count - 1) as f64;
+    let mut freqs: Vec<f64> = (0..count)
+        .map(|index| 10.0_f64.powf(start_log + step * index as f64))
+        .collect();
+    if let Some(first) = freqs.first_mut() {
+        *first = start;
+    }
+    if let Some(last) = freqs.last_mut() {
+        *last = end;
+    }
+    freqs
 }
 
 fn next_fast_len(mut value: usize) -> usize {
@@ -725,7 +725,13 @@ mod tests {
             let maximum = actual
                 .iter()
                 .zip(&fixture.multivariate[metric])
-                .map(|(actual, expected)| (actual - expected).abs())
+                .map(|(actual, expected)| {
+                    if metric == "mic" {
+                        (actual - expected.abs()).abs()
+                    } else {
+                        (actual - expected).abs()
+                    }
+                })
                 .fold(0.0, f64::max);
             println!("{metric} maximum error: {maximum:.12e}");
             assert!(maximum.is_finite(), "{metric} produced non-finite error");
@@ -735,6 +741,67 @@ mod tests {
                 1e-9
             };
             assert!(maximum < tolerance, "{metric} maximum error {maximum}");
+        }
+    }
+
+    #[test]
+    fn test_gamma1_band_inclusion() {
+        let frequencies = logspace(4.0, 40.0, N_FREQS);
+        assert_eq!(frequencies.len(), 15);
+        assert_eq!(*frequencies.first().unwrap(), 4.0);
+        assert_eq!(*frequencies.last().unwrap(), 40.0);
+
+        let gamma1_band = BANDS.iter().find(|b| b.2 == "Gamma1").unwrap();
+        let in_gamma1: Vec<f64> = frequencies
+            .iter()
+            .copied()
+            .filter(|&f| f >= gamma1_band.0 - 1e-9 && f <= gamma1_band.1 + 1e-9)
+            .collect();
+        // Gamma1 is 30.0 - 40.0 Hz. It MUST contain both 33.93 Hz and 40.0 Hz!
+        assert_eq!(
+            in_gamma1.len(),
+            2,
+            "Gamma1 should include exactly 2 bins, got: {in_gamma1:?}"
+        );
+        assert!((in_gamma1[0] - 33.9337).abs() < 0.01);
+        assert!((in_gamma1[1] - 40.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_mic_permutation_invariance() {
+        let fixture: ConnectivityFixture =
+            serde_json::from_str(include_str!("../tests/reference/connectivity_mne_0_8.json"))
+                .unwrap();
+        let cycles: Vec<f64> = logspace(3.0, 20.0, N_FREQS)
+            .into_iter()
+            .map(|value| value as usize as f64)
+            .collect();
+        let coefficients =
+            morlet_coefficients(&fixture.data, fixture.sfreq, &fixture.frequencies, &cycles);
+        let options = Options::connectivity_test();
+        let orig = multivariate_scores(&coefficients, &fixture.labels, &options);
+
+        // Permute the labels and data channels (swap channel 0 and 1)
+        let mut perm_data = fixture.data.clone();
+        perm_data.swap(0, 1);
+        let mut perm_labels = fixture.labels.clone();
+        perm_labels.swap(0, 1);
+        let perm_coeffs =
+            morlet_coefficients(&perm_data, fixture.sfreq, &fixture.frequencies, &cycles);
+        let permuted = multivariate_scores(&perm_coeffs, &perm_labels, &options);
+
+        // MIC magnitude and MIM must be identical under permutation
+        for (actual, perm) in orig.mic.iter().zip(&permuted.mic) {
+            assert!(
+                (actual - perm).abs() < 1e-9,
+                "MIC not permutation invariant: {actual} vs {perm}"
+            );
+        }
+        for (actual, perm) in orig.mim.iter().zip(&permuted.mim) {
+            assert!(
+                (actual - perm).abs() < 1e-9,
+                "MIM not permutation invariant: {actual} vs {perm}"
+            );
         }
     }
 }

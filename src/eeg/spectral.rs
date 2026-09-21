@@ -184,25 +184,21 @@ fn linear_fit_log_frequency(spectrum: &[f64]) -> (f64, f64, f64) {
     (intercept, slope, 1.0 - residual / total)
 }
 
-fn compute_spectral_edge_50(power: &[f64], start_freq_hz: f64, freq_step_hz: f64) -> f64 {
-    let half = power.iter().map(|&v| v.max(0.0)).sum::<f64>() / 2.0;
-    if half <= 0.0 || power.is_empty() {
+fn fractional_latency(power: &[f64], fraction: f64) -> f64 {
+    let non_neg: Vec<f64> = power.iter().map(|&v| v.max(0.0)).collect();
+    let total: f64 = non_neg.iter().sum();
+    if total <= 0.0 || non_neg.is_empty() {
         return 0.0;
     }
+    let target = fraction * total;
     let mut cumulative = 0.0;
-    for (i, &val) in power.iter().enumerate() {
-        let v = val.max(0.0);
-        let next_cum = cumulative + v;
-        if next_cum >= half {
-            if i == 0 || v <= 0.0 {
-                return start_freq_hz;
-            }
-            let frac = (half - cumulative) / v;
-            return start_freq_hz + (i as f64 - 1.0 + frac) * freq_step_hz;
+    for (i, &v) in non_neg.iter().enumerate() {
+        cumulative += v;
+        if cumulative >= target {
+            return i as f64;
         }
-        cumulative = next_cum;
     }
-    start_freq_hz + (power.len().saturating_sub(1) as f64) * freq_step_hz
+    non_neg.len().saturating_sub(1) as f64
 }
 
 pub fn irasa_features(signal: &[f64], sfreq: f64) -> BTreeMap<String, f64> {
@@ -224,7 +220,7 @@ pub fn irasa_features(signal: &[f64], sfreq: f64) -> BTreeMap<String, f64> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let descriptor_max = 50.min(original.len().saturating_sub(1));
+    let descriptor_max = 40.min(original.len().saturating_sub(1));
     let aperiodic_descriptor = (1..=descriptor_max)
         .map(|frequency| {
             let mut values = resampled
@@ -253,7 +249,7 @@ pub fn irasa_features(signal: &[f64], sfreq: f64) -> BTreeMap<String, f64> {
         .iter()
         .map(|value| value.max(0.0))
         .collect::<Vec<_>>();
-    let spectral_edge = compute_spectral_edge_50(&oscillatory_descriptor, 1.0, 1.0);
+    let spectral_edge = fractional_latency(&oscillatory_descriptor, 0.5);
     let oscillatory = raw_oscillatory
         .iter()
         .map(|value| value.max(0.0))
@@ -262,7 +258,7 @@ pub fn irasa_features(signal: &[f64], sfreq: f64) -> BTreeMap<String, f64> {
     with_dc.extend_from_slice(&oscillatory);
     let mut output = relative_bandpowers(&with_dc, 40, "Irasa");
     output.insert("intercept_Irasa".into(), intercept);
-    output.insert("slope_Irasa".into(), -slope);
+    output.insert("slope_Irasa".into(), slope);
     output.insert("rsquared_Irasa".into(), r_squared);
     output.insert("auc_Irasa".into(), auc);
     output.insert("oscspectraledge_Irasa".into(), spectral_edge);
@@ -395,7 +391,7 @@ fn fit_gaussians(frequencies: &[f64], target: &[f64], peaks: &mut [Gaussian]) {
 }
 
 fn fooof_model(psd: &[f64]) -> (Vec<f64>, BTreeMap<String, f64>) {
-    let fit_max = 50.min(psd.len().saturating_sub(1));
+    let fit_max = 40.min(psd.len().saturating_sub(1));
     let frequencies = (1..=fit_max).map(|value| value as f64).collect::<Vec<_>>();
     let power = psd[1..=fit_max]
         .iter()
@@ -599,7 +595,7 @@ fn fooof_model(psd: &[f64]) -> (Vec<f64>, BTreeMap<String, f64>) {
         .collect::<Vec<_>>();
     parameters.insert(
         "oscspectraledge_FOOOF".into(),
-        compute_spectral_edge_50(&clipped, 1.0, 1.0),
+        fractional_latency(&clipped, 0.5),
     );
     (clipped, parameters)
 }
@@ -706,23 +702,23 @@ mod tests {
     #[test]
     fn compare_ccstools_spectral_fixture() {
         for source in [
+            include_str!("../tests/reference/spectral_ccstools.json"),
+            include_str!("../tests/reference/spectral_ccstools_1000hz.json"),
             include_str!("../tests/reference/spectral_specparam.json"),
             include_str!("../tests/reference/spectral_specparam_1000hz.json"),
         ] {
             let fixture: SpectralFixture = serde_json::from_str(source).unwrap();
+            let (_, psd) = welch_median(&fixture.signal, fixture.sfreq);
             let mut actual = fooof_features(&fixture.signal, fixture.sfreq);
             actual.extend(irasa_features(&fixture.signal, fixture.sfreq));
+            actual.extend(relative_bandpowers(&psd, 40, "PSD"));
             for (name, &expected) in &fixture.values {
-                if !actual.contains_key(name) {
-                    println!("Missing key in actual: {}", name);
-                    continue;
-                }
+                assert!(
+                    actual.contains_key(name),
+                    "Missing key in actual: {name}"
+                );
                 let value = actual[name];
                 let error = (value - expected).abs();
-                println!(
-                    "{} Hz {name}: rust={value:.12} python={expected:.12} error={error:.4e}",
-                    fixture.sfreq
-                );
                 let tolerance = if name == "auc_FOOOF" {
                     5e-1
                 } else if name == "auc_Irasa" {
@@ -740,17 +736,16 @@ mod tests {
                     || name.starts_with("pw_")
                 {
                     1.5e-2
-                } else if name.ends_with("_FOOOF") {
+                } else if name.ends_with("_FOOOF") || name.ends_with("_Irasa") || name.ends_with("_PSD") {
                     1e-3
                 } else {
                     1e-4
                 };
-                if error > tolerance {
-                    println!(
-                        "    {} Hz {} error {} > {}",
-                        fixture.sfreq, name, error, tolerance
-                    );
-                }
+                assert!(
+                    error <= tolerance,
+                    "{} Hz {} error {} > {} (actual={}, expected={})",
+                    fixture.sfreq, name, error, tolerance, value, expected
+                );
             }
         }
     }
