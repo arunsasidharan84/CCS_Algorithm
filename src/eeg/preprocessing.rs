@@ -39,6 +39,104 @@ pub struct PreprocessOptions {
     /// the built-in `is_eeg_label` heuristic".
     #[serde(default)]
     pub non_eeg_channels: Vec<String>,
+    /// Stimulus-locked epoching (ERP). When set, the continuous recording is
+    /// downsampled and filtered first, then cut into epochs around these
+    /// events, and bad-channel detection / GEDAI / interpolation run on the
+    /// epochs (GEDAI uses one trial per window).
+    #[serde(default)]
+    pub stim_epochs: Option<StimEpochOptions>,
+}
+
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct StimEpochOptions {
+    /// Event onsets in seconds from the start of the recording.
+    pub onsets: Vec<f64>,
+    /// Event label per onset (e.g. "Stimulus/S 51"); becomes epoch_labels.
+    pub labels: Vec<String>,
+    /// Epoch start / end relative to the event, seconds (MNE: tmax inclusive).
+    pub tmin: f64,
+    pub tmax: f64,
+    /// Optional per-epoch baseline correction window (seconds).
+    #[serde(default)]
+    pub baseline: Option<[f64; 2]>,
+}
+
+/// Epoch timing written next to the data so analyses know the time axis.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct EpochMeta {
+    pub epoch_tmin: f64,
+    pub epoch_tmax: f64,
+    #[serde(default)]
+    pub epoch_baseline: Option<[f64; 2]>,
+    #[serde(default)]
+    pub epoch_onsets: Vec<f64>,
+    #[serde(default)]
+    pub epochs_dropped: usize,
+}
+
+/// Cuts stimulus-locked epochs (MNE semantics: samples round(tmin*rate) ..=
+/// round(tmax*rate) around round(onset*rate); epochs running past either end
+/// are dropped). Returns the concatenated epochs, labels, samples per epoch
+/// and the timing metadata.
+pub fn cut_stim_epochs(
+    data: &[Vec<f64>],
+    rate: f64,
+    stim: &StimEpochOptions,
+) -> Result<(Vec<Vec<f64>>, Vec<String>, usize, EpochMeta), String> {
+    if !(stim.tmax > stim.tmin) {
+        return Err(format!("epoch tmax ({}) must be after tmin ({})", stim.tmax, stim.tmin));
+    }
+    let len = data.first().map(Vec::len).unwrap_or(0);
+    let start_off = (stim.tmin * rate).round() as i64;
+    let stop_off = (stim.tmax * rate).round() as i64;
+    let n = (stop_off - start_off + 1) as usize;
+    let times: Vec<f64> = (0..n).map(|k| (start_off + k as i64) as f64 / rate).collect();
+    let base_idx: Vec<usize> = match stim.baseline {
+        Some([b0, b1]) => (0..n)
+            .filter(|&k| times[k] >= b0 - 1e-9 && times[k] <= b1 + 1e-9)
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut out = vec![Vec::with_capacity(n * stim.onsets.len()); data.len()];
+    let mut labels = Vec::new();
+    let mut onsets = Vec::new();
+    let mut dropped = 0usize;
+    for (i, onset) in stim.onsets.iter().enumerate() {
+        let ev = (onset * rate).round() as i64;
+        let a = ev + start_off;
+        if a < 0 || (a as usize) + n > len {
+            dropped += 1;
+            continue;
+        }
+        let a = a as usize;
+        for (c, ch) in data.iter().enumerate() {
+            let seg = &ch[a..a + n];
+            let bm = if base_idx.is_empty() {
+                0.0
+            } else {
+                base_idx.iter().map(|&k| seg[k]).sum::<f64>() / base_idx.len() as f64
+            };
+            out[c].extend(seg.iter().map(|v| v - bm));
+        }
+        labels.push(stim.labels.get(i).cloned().unwrap_or_else(|| format!("Event {}", i + 1)));
+        onsets.push(*onset);
+    }
+    if labels.len() < 2 {
+        return Err(format!(
+            "only {} stimulus epoch(s) fit inside the recording ({} events, {} dropped at the edges)",
+            labels.len(),
+            stim.onsets.len(),
+            dropped
+        ));
+    }
+    let meta = EpochMeta {
+        epoch_tmin: start_off as f64 / rate,
+        epoch_tmax: stop_off as f64 / rate,
+        epoch_baseline: stim.baseline,
+        epoch_onsets: onsets,
+        epochs_dropped: dropped,
+    };
+    Ok((out, labels, n, meta))
 }
 
 #[derive(Serialize)]
@@ -65,6 +163,8 @@ pub struct PortableRecording {
     pub source_epoch_samples: Option<usize>,
     #[serde(default)]
     pub epoch_labels: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub epoch_meta: Option<EpochMeta>,
 }
 
 struct GedaiResult {
@@ -146,12 +246,47 @@ pub fn run(
         });
     }
 
+    let mut epoch_meta: Option<EpochMeta> = None;
+    if let Some(stim) = options.stim_epochs.as_ref().filter(|s| !s.onsets.is_empty()) {
+        if rec.source_epoch_samples.is_some() {
+            warnings.push("input is already epoched; stimulus epoching skipped".into());
+        } else {
+            let (epochs, labels, n, meta) = cut_stim_epochs(&f64_channels, rec.rate, stim)?;
+            eprintln!(
+                "PROGRESS 43 Cut {} stimulus-locked epochs ({} samples, {:.3}..{:.3} s){}",
+                labels.len(),
+                n,
+                meta.epoch_tmin,
+                meta.epoch_tmax,
+                if meta.epochs_dropped > 0 {
+                    format!(", {} dropped at the recording edges", meta.epochs_dropped)
+                } else {
+                    String::new()
+                }
+            );
+            if meta.epochs_dropped > 0 {
+                warnings.push(format!(
+                    "{} event(s) too close to the recording edges were dropped",
+                    meta.epochs_dropped
+                ));
+            }
+            f64_channels = epochs;
+            rec.source_epoch_samples = Some(n);
+            rec.epoch_labels = Some(labels);
+            epoch_meta = Some(meta);
+        }
+    }
+
     let bad_channels = if options.badchannel {
         detect_bad_channels(rec)
     } else {
         Vec::new()
     };
-    if options.epoch_before_gedai || options.epoch_length_seconds.is_some() {
+    // Already-epoched data (stimulus epochs, -epo.fif, epoched .set) keeps its
+    // own epochs: re-chunking would break the trial alignment and labels.
+    if rec.source_epoch_samples.is_none()
+        && (options.epoch_before_gedai || options.epoch_length_seconds.is_some())
+    {
         let sec = options
             .epoch_length_seconds
             .unwrap_or(options.gedai_epoch_seconds);
@@ -171,15 +306,40 @@ pub fn run(
     let mut sensai_score = None;
     let mut thresholds = Vec::new();
     if options.gedai && rec.channels.len() >= 4 {
+        // Epoched data: one epoch per GEDAI window, and the data are padded to
+        // whole windows (then trimmed back) so no trial is cut off.
+        let orig_len = f64_channels.first().map(Vec::len).unwrap_or(0);
+        let epoched = rec
+            .source_epoch_samples
+            .filter(|&n| n >= 4 && orig_len / n >= 2);
+        let gedai_seconds = epoched
+            .map(|n| n as f64 / rec.rate)
+            .unwrap_or(options.gedai_epoch_seconds);
+        if epoched.is_some() {
+            let win = ((rec.rate * gedai_seconds).round() as usize).max(4);
+            let win = if win % 2 == 0 { win } else { win + 1 };
+            let padded = ((orig_len + win - 1) / win).max(2) * win;
+            if padded > orig_len {
+                for ch in &mut f64_channels {
+                    ch.resize(padded, 0.0);
+                }
+            }
+            eprintln!(
+                "PROGRESS 44 GEDAI on {} epochs ({} samples per window)",
+                orig_len / epoched.unwrap(),
+                win
+            );
+        }
         match gedai(
             &mut f64_channels,
             rec.rate,
             &rec.labels,
-            options.gedai_epoch_seconds,
+            gedai_seconds,
             &options.gedai_threshold,
         ) {
             Ok(result) => {
                 let len = result.clean.first().map(Vec::len).unwrap_or(0);
+                let len = if epoched.is_some() { orig_len.min(len) } else { len };
                 f64_channels = result.clean;
                 for ch in &mut f64_channels {
                     ch.truncate(len);
@@ -187,7 +347,12 @@ pub fn run(
                 sensai_score = Some(result.score);
                 thresholds = result.thresholds;
             }
-            Err(err) => warnings.push(format!("GEDAI skipped: {err}")),
+            Err(err) => {
+                for ch in &mut f64_channels {
+                    ch.truncate(orig_len);
+                }
+                warnings.push(format!("GEDAI skipped: {err}"))
+            }
         }
     }
     if options.interpolate && !bad_channels.is_empty() {
@@ -215,7 +380,7 @@ pub fn run(
         .collect();
 
     eprintln!("PROGRESS 90 Saving portable JSON to {}...", output);
-    save_portable(output, rec)?;
+    save_portable_with(output, rec, epoch_meta)?;
     Ok(PreprocessSummary {
         input: input.into(),
         output: output.into(),
@@ -246,7 +411,12 @@ pub fn load_portable(path: &Path) -> Result<Recording, String> {
 }
 
 fn save_portable(path: &str, rec: &Recording) -> Result<(), String> {
+    save_portable_with(path, rec, None)
+}
+
+fn save_portable_with(path: &str, rec: &Recording, epoch_meta: Option<EpochMeta>) -> Result<(), String> {
     let portable = PortableRecording {
+        epoch_meta,
         format: "ccseeg-v1".into(),
         sample_rate: rec.rate,
         labels: rec.labels.clone(),
@@ -1140,6 +1310,125 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_stim_epochs_follows_mne_sample_convention() {
+        let rate = 250.0;
+        let ch: Vec<f64> = (0..5000).map(|s| s as f64).collect();
+        let stim = StimEpochOptions {
+            onsets: vec![0.2, 4.0, 10.0, 19.9],
+            labels: vec!["S 51".into(), "S 52".into(), "S 51".into(), "S 52".into()],
+            tmin: -0.5,
+            tmax: 1.2,
+            baseline: None,
+        };
+        let (out, labels, n, meta) = cut_stim_epochs(&[ch.clone(), ch], rate, &stim).unwrap();
+        assert_eq!(n, 426); // -125 ..= 300
+        assert_eq!(labels, vec!["S 52".to_string(), "S 51".to_string()]); // first + last dropped
+        assert_eq!(meta.epochs_dropped, 2);
+        assert_eq!(out[0].len(), 2 * 426);
+        assert_eq!(out[0][0], 1000.0 - 125.0);
+        assert_eq!(out[0][426], 2500.0 - 125.0);
+        assert!((meta.epoch_tmin + 0.5).abs() < 1e-12 && (meta.epoch_tmax - 1.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stim_epoch_baseline_is_removed() {
+        let ch: Vec<f64> = vec![3.0; 1000];
+        let stim = StimEpochOptions {
+            onsets: vec![2.0, 5.0],
+            labels: vec!["a".into(), "b".into()],
+            tmin: -0.2,
+            tmax: 0.5,
+            baseline: Some([-0.2, 0.0]),
+        };
+        let (out, _, n, _) = cut_stim_epochs(&[ch], 100.0, &stim).unwrap();
+        assert_eq!(n, 71);
+        assert!(out[0].iter().all(|v| v.abs() < 1e-12));
+    }
+
+    #[test]
+    fn stim_epochs_are_cut_before_gedai_and_keep_every_trial() {
+        let rate = 100.0;
+        let labels: Vec<String> = ["Fz", "Cz", "Pz", "Oz", "C3", "C4", "F3", "F4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let n = 6000;
+        let mut channels = vec![vec![0f32; n]; labels.len()];
+        for (c, ch) in channels.iter_mut().enumerate() {
+            for (s, v) in ch.iter_mut().enumerate() {
+                let t = s as f64 / rate;
+                *v = ((t * 7.3 * (c + 1) as f64).sin() * 5.0
+                    + (t * 1.1 + c as f64).cos() * 2.0
+                    + ((s * 7919 + c * 104729) % 97) as f64 / 97.0) as f32;
+            }
+        }
+        let mut rec = Recording {
+            rate,
+            labels,
+            channels,
+            source_epoch_samples: None,
+            epoch_labels: None,
+        };
+        let mut onsets: Vec<f64> = (0..25).map(|i| 1.0 + i as f64 * 2.3).collect();
+        onsets.insert(0, 0.2); // too close to the start: dropped
+        let ev_labels: Vec<String> = (0..onsets.len())
+            .map(|i| if i % 4 == 0 { "Stimulus/S 52".into() } else { "Stimulus/S 51".into() })
+            .collect();
+        let opts: PreprocessOptions = serde_json::from_value(serde_json::json!({
+            "downsample": false, "downsample_freq": 100.0,
+            "filter": true, "low_hz": 0.5, "high_hz": 30.0, "notch_hz": 0.0,
+            "badchannel": false, "gedai": true, "interpolate": false,
+            "epoch_before_gedai": true, "gedai_epoch_seconds": 1.0, "gedai_threshold": "auto",
+            "stim_epochs": {"onsets": onsets, "labels": ev_labels,
+                            "tmin": -0.5, "tmax": 1.2, "baseline": [-0.2, 0.0]}
+        }))
+        .unwrap();
+        let out = "/tmp/ccs_stim_epochs_test.ccseeg.json";
+        run(&mut rec, "synthetic", out, &opts).unwrap();
+        assert_eq!(rec.source_epoch_samples, Some(171));
+        assert_eq!(rec.epoch_labels.as_ref().unwrap().len(), 25);
+        assert_eq!(rec.channels[0].len(), 25 * 171);
+        assert!(rec.channels[0].iter().all(|v| v.is_finite()));
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
+        assert_eq!(v["source_epoch_samples"], 171);
+        assert!((v["epoch_tmin"].as_f64().unwrap() + 0.5).abs() < 1e-12);
+        assert!((v["epoch_tmax"].as_f64().unwrap() - 1.2).abs() < 1e-12);
+        assert_eq!(v["epoch_labels"].as_array().unwrap().len(), 25);
+        assert_eq!(v["epochs_dropped"], 1);
+        let back = load_portable(Path::new(out)).unwrap();
+        assert_eq!(back.source_epoch_samples, Some(171));
+    }
+
+    #[test]
+    fn epoched_input_is_not_rechunked_or_truncated() {
+        let rate = 100.0;
+        let labels: Vec<String> = ["Fz", "Cz", "Pz", "Oz", "C3", "C4"].iter().map(|s| s.to_string()).collect();
+        let per = 171;
+        let epochs = 13;
+        let mut channels = vec![vec![0f32; per * epochs]; labels.len()];
+        for (c, ch) in channels.iter_mut().enumerate() {
+            for (s, v) in ch.iter_mut().enumerate() {
+                *v = ((s as f64 * 0.21 * (c + 2) as f64).sin() * 4.0 + ((s * 31 + c * 7) % 13) as f64 * 0.1) as f32;
+            }
+        }
+        let mut rec = Recording {
+            rate,
+            labels,
+            channels,
+            source_epoch_samples: Some(per),
+            epoch_labels: Some((0..epochs).map(|i| format!("S {}", 51 + i % 2)).collect()),
+        };
+        let opts: PreprocessOptions = serde_json::from_value(serde_json::json!({
+            "downsample_freq": 100.0, "filter": false, "badchannel": false, "gedai": true,
+            "interpolate": false, "epoch_before_gedai": true, "gedai_epoch_seconds": 1.0
+        }))
+        .unwrap();
+        run(&mut rec, "synthetic", "/tmp/ccs_epoched_input_test.ccseeg.json", &opts).unwrap();
+        assert_eq!(rec.source_epoch_samples, Some(per));
+        assert_eq!(rec.channels[0].len(), per * epochs);
+    }
 
     fn varied_recording() -> Recording {
         // Six well-behaved channels with comparable variance, one dead channel
